@@ -31,7 +31,7 @@ print("{} started".format(me))
 
 while True:
     work = pickle.loads(pull_socket.recv())  # receive work from a source
-    print("{} received workload {} from Splitter".format(me, work[1]))
+    print("{} received workload {} from Splitter".format(me, work))
     words = work.strip().split(' ') # list of words
     print(words)
     for word in words:
