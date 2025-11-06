@@ -148,11 +148,30 @@ class ChordNode:
 
             if request[0] == constChord.LOOKUP_REQ:  # A lookup request
                 self.logger.info("Node {:04n} received LOOKUP {:04n} from {:04n}."
-                                 .format(self.node_id, int(request[1]), int(sender)))
+                                 .format(self.node_id, int(request[1]), int(sender))) # sender is the client number
 
-                # look up and return local successor 
-                next_id: int = self.local_successor_node(request[1])
-                self.channel.send_to([sender], (constChord.LOOKUP_REP, next_id))
+                # Get the key we are looking for, AND the original client who asked for it.
+                key = int(request[1])
+                client = request[2]
+                print(f"\nRequest: (Type: {request[0]}, Key: {key}, Client: {client})")
+
+                # Figure out the best node we know of to handle this key.
+                next_id: int = self.local_successor_node(key) # best possible node in finger table
+                print("Next ID:", next_id)
+
+                # Am I responsible? (Base Case)
+                # If the key lies between my predecessor and me, it's mine.
+                if self.in_between(key, self.finger_table[0] + 1, self.node_id + 1):
+                    # We found it! Send the answer directly back to the original client.
+                    # This is 'tail recursion' because we don't send it back up the chain.
+                    print(f"Successor found: {next_id}")
+                    self.channel.send_to([str(client)], (constChord.LOOKUP_REP, next_id))
+                # Pass it on (Recursive Step)
+                else:
+                    # Not my job. Pass the request to the next node (next_id).
+                    # We keep 'client' in the message so they know who started it.
+                    print(f"Looking for successor: {next_id} -> {key}")
+                    self.channel.send_to({str(next_id)}, (constChord.LOOKUP_REQ, key, client))
 
                 # Finally do a sanity check
                 if not self.channel.exists(next_id):  # probe for existence

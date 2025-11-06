@@ -10,6 +10,7 @@ Chord Application
 import logging
 import sys
 import multiprocessing as mp
+import random
 
 import chordnode as chord_node
 import constChord
@@ -29,7 +30,28 @@ class DummyChordClient:
         self.channel.bind(self.node_id)
 
     def run(self):
-        print("Implement me pls...")
+        # Pick a random target and a random request
+        # We need an entry point into the ring. We ask Redis for all 'node' members
+        node_list = list(self.channel.channel.smembers('node'))
+        # Pick one at random to be our first point of contact
+        node = random.choice(node_list).decode()
+
+        # Pick a random key to look up. It must be within the address space (0 to MAXPROC-1)
+        key = random.randrange(0, self.channel.MAXPROC)
+        print(f"Asking node {node} to look for key {key}...")
+
+        # Start the recursion, send the initial request
+        # We send a tuple: (MESSAGE_TYPE, KEY, ORIGINAL_CLIENT_ID)
+        # Crucial: We include 'self.node_id' so the final node knows who to call back
+        self.channel.send_to({node}, (constChord.LOOKUP_REQ, key, self.node_id))
+        
+        # Wait until someone answers
+        # receive_from_any() blocks the process until a message arrives
+        # We assume the next message is the answer (no need to check the message type)
+        response = self.channel.receive_from_any()  # Wait for any request
+        answer = response[1] # And the actual response
+        print(f"Key {key} is managed by node {answer[1]}.") # answer is a tuple (MESSAGE_TYPE, RESPONSIBLE_NODE_ID)
+        
         self.channel.send_to(  # a final multicast
             {i.decode() for i in list(self.channel.channel.smembers('node'))},
             constChord.STOP)
