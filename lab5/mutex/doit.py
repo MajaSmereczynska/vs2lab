@@ -16,7 +16,7 @@ import multiprocessing as mp
 from process import Process
 
 from context import lab_channel, lab_logging
-from constMutex import BEHAVIOR_TYPES
+from constMutex import BEHAVIOR_TYPES, ACTIVE
 
 lab_logging.setup(stream_level=logging.INFO, file_level=logging.DEBUG)
 
@@ -63,9 +63,14 @@ if __name__ == "__main__":  # if script is started from command line
 
     # start n competing peers in separate processes
     children: list = []
+    active = False
     for i in range(n):
         peer_name = "Peer-" + str(i)
         peer_type = random.choice(BEHAVIOR_TYPES)
+        if peer_type == active:
+            active = True
+        if i+1 == n and not active:
+            peer_type = ACTIVE
         peer_proc = mp.Process(
             target=create_and_run,
             name=peer_name,
@@ -88,6 +93,9 @@ if __name__ == "__main__":  # if script is started from command line
     logger.warning("Process {} of type {} has crashed.".format(
         proc_to_crash.name, type_to_crash))
 
-    # wait for peer procs to finish
-    for peer_proc in children:
-        peer_proc[0].join()
+    try:
+        # wait for peer procs to finish
+        for peer_proc in children:
+            peer_proc[0].join()
+    except KeyboardInterrupt:
+        logger.info("Quitting.")

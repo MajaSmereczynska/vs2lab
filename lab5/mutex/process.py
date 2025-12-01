@@ -1,8 +1,10 @@
 import logging
 import random
+import threading
 import time
+from time import sleep
 
-from constMutex import ENTER, RELEASE, ALLOW, ACTIVE
+from constMutex import ENTER, RELEASE, ALLOW, ACTIVE,  HEARTBEAT
 
 
 class Process:
@@ -41,6 +43,7 @@ class Process:
         self.process_id = self.channel.join('proc')  # Find out who you are
         self.all_processes: list = []  # All procs in the proc group
         self.other_processes: list = []  # Needed to multicast to others
+        self.heartbeats: dict = {}
         self.queue = []  # The request queue list
         self.clock = 0  # The current logical clock
         self.peer_name = 'unassigned'  # The original peer name
@@ -57,6 +60,18 @@ class Process:
         if len(self.queue) > 0:
             # self.queue.sort(key = lambda tup: tup[0])
             self.queue.sort()
+
+            dead_processes = set([
+                k for k, v in self.heartbeats.items() if v < time.time() - 5
+            ])
+            if dead_processes:
+                self.logger.warning(f"{self.__mapid()}: Dead processes: " + ", ".join(dead_processes))
+                self.all_processes = list(set(self.all_processes) - dead_processes)
+                self.other_processes = list(set(self.other_processes) - dead_processes)
+                self.heartbeats = {k: v for k, v in self.heartbeats.items() if k not in dead_processes}
+                self.logger.info(f"{self.__mapid()}: Cleaning queue because of dead processes.")
+                self.queue = [e for e in self.queue if e[1] in self.all_processes]
+
             # There should never be old ALLOW messages at the head of the queue
             while self.queue[0][2] == ALLOW:
                 del (self.queue[0])
@@ -88,12 +103,20 @@ class Process:
         self.channel.send_to(self.other_processes, msg)
 
     def __allowed_to_enter(self):
+        # WARNING may break:
+        # process with next ENTER receives and acks a different ENTER
+        #
+        # processes a, b, c:
+        # enter[a] enter[b] allow[a] ->
+        # len(self.other_processes) == len(set([req[1] for req in self.queue[1:]))
+        # 2 == 2
+        # is true, even if c does not ack
+
         # See who has sent a message (the set will hold at most one element per sender)
-        processes_with_later_message = set([req[1] for req in self.queue[1:]])
+        processes_with_later_message = set([req[1] for req in self.queue])
         # Access granted if this process is first in queue and all others have answered (logically) later
         first_in_queue = self.queue[0][1] == self.process_id
-        all_have_answered = len(self.other_processes) == len(
-            processes_with_later_message)
+        all_have_answered = len(self.all_processes) == len(processes_with_later_message)
         return first_in_queue and all_have_answered
 
     def __receive(self):
@@ -101,6 +124,15 @@ class Process:
         _receive = self.channel.receive_from(self.other_processes, 3)
         if _receive:
             msg = _receive[1]
+
+            if msg[2] == HEARTBEAT:
+                self.heartbeats[msg[1]] = time.time()
+                self.__cleanup_queue() # remove processes with timeout, which might have an "ENTER" at the top
+                return
+
+            # Occasionally serve requests to enter
+            while random.choice([True, False]):
+                pass
 
             self.clock = max(self.clock, msg[0])  # Adjust clock value...
             self.clock = self.clock + 1  # ...and increment
@@ -131,6 +163,13 @@ class Process:
                                         self.__mapid(msg[1]),
                                         msg[2]), self.queue))))
 
+    def __do_heartbeat(self):
+        while True:
+            self.clock = self.clock + 1  # Increment clock value
+            msg = (self.clock, self.process_id, HEARTBEAT)
+            self.channel.send_to(self.other_processes, msg)
+            sleep(1)
+
     def init(self, peer_name, peer_type):
         self.channel.bind(self.process_id)
 
@@ -141,6 +180,8 @@ class Process:
         self.other_processes = list(self.channel.subgroup('proc'))
         self.other_processes.remove(self.process_id)
 
+        self.heartbeats = {k : time.time() for k in self.other_processes}
+
         self.peer_name = peer_name  # assign peer name
         self.peer_type = peer_type  # assign peer behavior
 
@@ -148,6 +189,61 @@ class Process:
             peer_name, self.__mapid()))
 
     def run(self):
+        t = threading.Thread(target=self.__do_heartbeat)
+        t.daemon = True
+        t.start()
+
+        try:
+            while True:
+                # Enter the critical section if
+                # 1) there are more than one process left and
+                # 2) this peer has active behavior and
+                # 3) random is true
+                if len(self.all_processes) > 1 and \
+                        self.peer_type == ACTIVE and \
+                        random.choice([True, False]):
+                    self.logger.debug("{} wants to ENTER CS at CLOCK {}."
+                                      .format(self.__mapid(), self.clock))
+
+                    self.__request_to_enter()
+                    start = time.time()
+                    while not self.__allowed_to_enter():
+                        self.__receive()
+                        if time.time() - start < 5:
+                            continue
+
+                    # Stay in CS for some time ...
+                    sleep_time = random.randint(0, 2000)
+                    self.logger.debug("{} enters CS for {} milliseconds."
+                                      .format(self.__mapid(), sleep_time))
+                    print(" CS <- {}".format(self.__mapid()))
+                    time.sleep(sleep_time/1000)
+
+                    # ... then leave CS
+                    print(" CS -> {}".format(self.__mapid()))
+                    self.__release()
+                    continue
+
+                self.__receive()
+        except KeyboardInterrupt:
+            self.logger.info(f"{self.__mapid()}: Quitting.")
+
+
+
+"""
+Proc-122 timed out on RECEIVE. Local queue: [('Clock 61', 'Proc-197', 'ENTER'), ('Clock 63', 'Proc-75', 'ENTER'), ('Clock 70', 'Proc-186', 'ENTER'), ('Clock 72', 'Proc-122', 'ENTER'), ('Clock 79', 'Proc-75', 'ALLOW'), ('Clock 80', 'Proc-186', 'ALLOW')]
+
+timeout while waiting is not enough.
+proc197 is dead / busy while in CS.
+proc197 will never reply, but is in the queue (so it is considered alive).
+program will never continue.
+
+
+furthermore could a living process just never respond because of "random.choice([True, False])"
+
+
+def run(self):
+    try:
         while True:
             # Enter the critical section if
             # 1) there are more than one process left and
@@ -158,23 +254,43 @@ class Process:
                     random.choice([True, False]):
                 self.logger.debug("{} wants to ENTER CS at CLOCK {}."
                                   .format(self.__mapid(), self.clock))
-
+    
                 self.__request_to_enter()
+                start = time.time()
                 while not self.__allowed_to_enter():
                     self.__receive()
-
+                    if time.time() - start > 5:
+                        dead_processes = set(self.all_processes) - set([
+                            e[1] for e in self.queue
+                        ])
+                        if not dead_processes:
+                            continue
+                        self.logger.warning(
+                            f"{self.__mapid()}: Processes on the blacklist: "
+                            + ", ".join(dead_processes)
+                        )
+                        self.all_processes = list(set(self.all_processes) - dead_processes)
+                        self.other_processes = list(set(self.other_processes) - dead_processes)
+                        self.logger.info("{} queued {} processes.".format(self.__mapid(), self.queue))
+                        self.logger.info(f"{self.__mapid()}: Cleaning queue because of dead processes.")
+                        self.queue = [e for e in self.queue if e[1] in self.all_processes]
+                        self.logger.info("{} queued {} processes.".format(self.__mapid(), self.queue))
+    
                 # Stay in CS for some time ...
                 sleep_time = random.randint(0, 2000)
                 self.logger.debug("{} enters CS for {} milliseconds."
                                   .format(self.__mapid(), sleep_time))
                 print(" CS <- {}".format(self.__mapid()))
                 time.sleep(sleep_time/1000)
-
+    
                 # ... then leave CS
                 print(" CS -> {}".format(self.__mapid()))
                 self.__release()
                 continue
-
+    
             # Occasionally serve requests to enter (
             if random.choice([True, False]):
                 self.__receive()
+    except KeyboardInterrupt:
+        self.logger.info(f"{self.__mapid()}: Quitting.")
+"""
