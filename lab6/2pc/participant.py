@@ -2,9 +2,9 @@ import random
 import logging
 
 # coordinator messages
-from const2PC import VOTE_REQUEST, GLOBAL_COMMIT, GLOBAL_ABORT
+from const2PC import VOTE_REQUEST, GLOBAL_COMMIT, GLOBAL_ABORT, PREPARE_COMMIT
 # participant decissions
-from const2PC import LOCAL_SUCCESS, LOCAL_ABORT
+from const2PC import LOCAL_SUCCESS, LOCAL_ABORT, READY_COMMIT
 # participant messages
 from const2PC import VOTE_COMMIT, VOTE_ABORT, NEED_DECISION
 # misc constants
@@ -77,23 +77,34 @@ class Participant:
                 # Notify coordinator about local commit vote
                 self.channel.send_to(self.coordinator, VOTE_COMMIT)
 
-                # Wait for coordinator to notify the final outcome
                 msg = self.channel.receive_from(self.coordinator, TIMEOUT)
+                if not msg: # controller not answering anymore
+                    decision = LOCAL_ABORT # we weren't ready to commit and controller died so locally aborting.
+                    # because handling between peers for final decision only if controller died in state PRECOMMIT
+                else:
+                    if msg[1] == PREPARE_COMMIT:
+                        self._enter_state('PRECOMMIT')
+                        self.channel.send_to(self.coordinator, READY_COMMIT)
 
-                if not msg:  # Crashed coordinator
-                    # Ask all processes for their decisions
-                    self.channel.send_to(self.all_participants, NEED_DECISION)
-                    while True:
-                        msg = self.channel.receive_from_any()
-                        # If someone reports a final decision,
-                        # we locally adjust to it
-                        if msg[1] in [
-                                GLOBAL_COMMIT, GLOBAL_ABORT, LOCAL_ABORT]:
+                        # Wait for coordinator to notify the final outcome
+                        msg = self.channel.receive_from(self.coordinator, TIMEOUT)
+
+                        if not msg:  # Crashed coordinator
+                            # Ask all processes for their decisions
+                            self.channel.send_to(self.all_participants, NEED_DECISION)
+                            while True:
+                                msg = self.channel.receive_from_any()
+                                # If someone reports a final decision,
+                                # we locally adjust to it
+                                if msg[1] in [
+                                        GLOBAL_COMMIT, GLOBAL_ABORT, LOCAL_ABORT]:
+                                    decision = msg[1]
+                                    break
+
+                        else:  # Coordinator came to a decision
                             decision = msg[1]
-                            break
-
-                else:  # Coordinator came to a decision
-                    decision = msg[1]
+                    else:  # Coordinator told us to abort or something
+                        decision = msg[1]
 
         # Change local state based on the outcome of the joint commit protocol
         # Note: If the protocol has blocked due to coordinator crash,

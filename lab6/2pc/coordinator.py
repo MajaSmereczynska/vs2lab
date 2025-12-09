@@ -4,9 +4,9 @@ import logging
 import stablelog
 
 # coordinator messages
-from const2PC import VOTE_REQUEST, GLOBAL_COMMIT, GLOBAL_ABORT
+from const2PC import VOTE_REQUEST, GLOBAL_COMMIT, GLOBAL_ABORT, PREPARE_COMMIT
 # participant messages
-from const2PC import VOTE_COMMIT, VOTE_ABORT
+from const2PC import VOTE_COMMIT, VOTE_ABORT, READY_COMMIT
 # misc constants
 from const2PC import TIMEOUT
 
@@ -67,6 +67,26 @@ class Coordinator:
 
             else:
                 assert msg[1] == VOTE_COMMIT
+                yet_to_receive.remove(msg[0])
+
+        # all participants are prepared to commit
+        self._enter_state('PRECOMMIT')
+
+        # send out prepare commit message
+        self.channel.send_to(self.participants, PREPARE_COMMIT)
+        # copy structure from above
+        yet_to_receive = list(self.participants)
+        while len(yet_to_receive) > 0:
+            msg = self.channel.receive_from(self.participants, TIMEOUT)
+            if (not msg) or (msg[1] == VOTE_ABORT):
+                reason = "timeout" if not msg else "local_abort from " + msg[0]
+                self._enter_state('ABORT')
+                # Inform all participants about global abort
+                self.channel.send_to(self.participants, GLOBAL_ABORT)
+                return "Coordinator {} terminated in state ABORT. Reason: {}."\
+                    .format(self.coordinator, reason)
+            else:
+                assert msg[1] == READY_COMMIT
                 yet_to_receive.remove(msg[0])
 
         # all participants have locally committed
